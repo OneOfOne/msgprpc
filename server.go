@@ -1,13 +1,15 @@
 //go:generate mkdir -p ./certs
-//go:generate openssl req -new -nodes -x509 -out certs/server.pem -keyout certs/server.key -days 3650 -subj "/C=US/ST=TX/L=Earth/O=Meteora/OU=IT"
+//go:generate openssl req -new -nodes -x509 -out certs/server.pem -keyout certs/server.key -days 3650 -subj "/C=US/ST=TX/L=Earth/O=Cube/OU=IT"
 
 package msgprpc
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"os"
+	"time"
 
 	"github.com/vmihailenco/msgpack"
 )
@@ -31,13 +33,11 @@ func init() {
 // RegisterType is an alias for msgpack.RegisterExt
 // allows you to send and receive structs, the id must be the same on both the client and server
 func RegisterType(id int8, v interface{}) {
-	if id < 0 {
-		panic("id < 0 reserved")
-	}
 	msgpack.RegisterExt(id, v)
 }
 
 var (
+	errRetry    = errors.New("retry")
 	errTooLow   = &handshakeResponse{Version, ErrClientVersionTooLow}
 	errNotFound = &call{Error: ErrNotFound}
 	okHandshake = &handshakeResponse{Version: Version}
@@ -50,7 +50,8 @@ func NewServer(ctx context.Context) *Server {
 	return &Server{
 		m:        map[string]Handler{},
 		ctx:      ctx,
-		cancelFn: cfn}
+		cancelFn: cfn,
+	}
 }
 
 type Server struct {
@@ -76,7 +77,7 @@ func (s *Server) Listen(addr string) error {
 	return nil
 }
 
-func (s *Server) ListenTLS(addr string, cert, key string) error {
+func (s *Server) ListenTLS(addr, cert, key string) error {
 	crt, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
 		return err
@@ -126,6 +127,9 @@ func (s *Server) Close() error {
 func (s *Server) handle(conn net.Conn) {
 	defer conn.Close()
 
+	// set a 1 second timeout for handshake, in case someone is trying to abuse the server
+	conn.SetDeadline(time.Now().Add(time.Second))
+
 	dec := msgpack.NewDecoder(conn)
 	dec.UseJSONTag(true)
 	enc := msgpack.NewEncoder(conn)
@@ -146,6 +150,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.log("handshake error (%+v): %v", &hs, err)
 		return
 	}
+
+	conn.SetDeadline(time.Time{})
 
 	for {
 		var c call

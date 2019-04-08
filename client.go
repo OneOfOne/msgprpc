@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -13,25 +12,27 @@ import (
 )
 
 func NewClient(addr string) (*Client, error) {
-	c := &Client{addr: addr}
-	if err := c.init(); err != nil {
+	c := &Client{
+		addr: addr,
+		dec:  msgpack.NewDecoder(nil).UseJSONTag(true),
+	}
+
+	if err := c.reinit(); err != nil {
 		return nil, err
 	}
+
 	return c, nil
 }
 
 type Client struct {
-	mux  sync.RWMutex
+	mux  sync.Mutex
 	addr string
 	conn net.Conn
 	enc  *msgpack.Encoder
 	dec  *msgpack.Decoder
 }
 
-func (c *Client) init() (err error) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
+func (c *Client) reinit() (err error) {
 	if c.conn != nil {
 		c.conn.Close()
 	}
@@ -58,18 +59,18 @@ func (c *Client) init() (err error) {
 		return err
 	}
 
-	enc := msgpack.NewEncoder(conn)
-	enc.UseJSONTag(true)
+	c.conn = conn
 
-	dec := msgpack.NewDecoder(conn)
-	dec.UseJSONTag(true)
+	c.dec.Reset(conn)
 
-	if err := enc.Encode(&handshake{Version: Version}); err != nil {
+	c.enc = msgpack.NewEncoder(conn).UseJSONTag(true)
+
+	if err := c.enc.Encode(&handshake{Version: Version}); err != nil {
 		return err
 	}
 
 	var hr handshakeResponse
-	if err := dec.Decode(&hr); err != nil {
+	if err := c.dec.Decode(&hr); err != nil {
 		return err
 	}
 
@@ -77,32 +78,51 @@ func (c *Client) init() (err error) {
 		return errors.New(hr.Error)
 	}
 
-	c.conn, c.enc, c.dec = conn, enc, dec
-
 	return nil
 }
 
-func (c *Client) Call(ctx context.Context, endpoint string, args ...interface{}) (out []interface{}, err error) {
-	var retried bool
+type Args []interface{}
 
-RETRY:
-	c.mux.RLock()
-	conn := c.conn
-	if conn != nil {
-		out, err = c.call(endpoint, args...)
-	}
-	c.mux.RUnlock()
-
-	if (shouldRetry(err) || conn == nil) && !retried {
-		log.Println("retry")
-		if err = c.init(); err != nil {
-			return
+func (c *Client) Call(ctx context.Context, endpoint string, args ...interface{}) (out Args, err error) {
+	done := make(chan struct{})
+	go func() {
+		c.mux.Lock()
+		defer c.mux.Unlock()
+		if out, err = c.call(endpoint, args...); shouldRetry(err) {
+			if err = c.reinit(); err == nil {
+				out, err = c.call(endpoint, args...)
+			}
 		}
-		retried = true
-		goto RETRY
-	}
 
-	return
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-ctx.Done():
+		c.conn.Close() // kill the connection to free the mutex
+		return nil, ctx.Err()
+	}
+}
+
+func (c *Client) BatchCall(ctx context.Context, endpoint string, allArgs []Args) (out []Args, errs []error) {
+	done := make(chan struct{})
+	out = make([]Args, len(allArgs))
+	errs = make([]error, len(allArgs))
+	go func() {
+		for i := range allArgs {
+			out[i], errs[i] = c.Call(ctx, endpoint, allArgs[i]...)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-ctx.Done():
+		return nil, []error{ctx.Err()}
+	}
 }
 
 func (c *Client) Close() (err error) {
@@ -116,6 +136,10 @@ func (c *Client) Close() (err error) {
 }
 
 func (c *Client) call(endpoint string, args ...interface{}) ([]interface{}, error) {
+	if c.conn == nil {
+		return nil, errRetry
+	}
+
 	if err := c.enc.Encode(&call{endpoint, args, ""}); err != nil {
 		return nil, err
 	}
@@ -136,6 +160,11 @@ func shouldRetry(err error) bool {
 	if err == nil {
 		return false
 	}
+
+	if err == errRetry {
+		return true
+	}
+
 	if _, ok := err.(net.Error); ok {
 		return true
 	}

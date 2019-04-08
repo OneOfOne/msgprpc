@@ -1,4 +1,4 @@
-package msgprpc_test
+package msgprpc
 
 import (
 	"context"
@@ -7,8 +7,6 @@ import (
 	"log"
 	"testing"
 	"time"
-
-	"github.com/OneOfOne/msgprpc"
 )
 
 type X struct {
@@ -17,8 +15,8 @@ type X struct {
 
 func TestServer(t *testing.T) {
 	log.SetFlags(log.Lshortfile)
-	msgprpc.RegisterType(0, (*X)(nil))
-	s := msgprpc.NewServer(context.Background())
+	RegisterType(0, (*X)(nil))
+	s := NewServer(context.Background())
 	s.Listen(":9851")
 	err := s.ListenTLS(":9852", "certs/server.pem", "certs/server.key")
 	if err != nil {
@@ -29,17 +27,17 @@ func TestServer(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	s.On("x", func(ctx context.Context, args ...interface{}) ([]interface{}, error) {
 		t.Logf("args: %#+v %T", args, args[0])
-		if args[0].(int8) == 0 {
+		if v, ok := args[0].(int8); ok && v == 0 {
 			return nil, errors.New("err")
 		}
 		return args, nil
 	})
-	//c, err := msgprpc.NewClient("tls://localhost:9852")
-	c, err := msgprpc.NewClient("tls+insecure://localhost:9852")
+	//c, err := NewClient("tls://localhost:9852")
+	c, err := NewClient("tls+insecure://localhost:9852")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ret, err := c.Call(context.Background(), "x", int8(1), uint64(1), float64(1), "test", []byte("x"), &X{"HI"})
+	ret, err := c.Call(context.Background(), "x", int8(1), uint64(1), []float64{0, 0.0000001, -0.5, -0}, "test", []byte("x"), &X{"HI"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +54,14 @@ func TestServer(t *testing.T) {
 	}
 	t.Logf("ret: %#+v %#v", ret, err)
 
+	rets, _ := c.BatchCall(context.Background(), "x", []Args{
+		{"one"},
+		{"two"},
+		{"three"},
+	})
+	for _, r := range rets {
+		t.Logf("%v", r)
+	}
 	s.Close()
 
 	ret, err = c.Call(context.Background(), "x", int8(0))
