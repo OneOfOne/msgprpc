@@ -11,22 +11,18 @@ import (
 	"github.com/vmihailenco/msgpack"
 )
 
-func NewClient(addr string) (*Client, error) {
-	c := &Client{
+func NewClient(addr, key string) *Client {
+	return &Client{
 		addr: addr,
+		key:  key,
 		dec:  msgpack.NewDecoder(nil).UseJSONTag(true),
 	}
-
-	if err := c.reinit(); err != nil {
-		return nil, err
-	}
-
-	return c, nil
 }
 
 type Client struct {
 	mux  sync.Mutex
 	addr string
+	key  string
 	conn net.Conn
 	enc  *msgpack.Encoder
 	dec  *msgpack.Decoder
@@ -65,7 +61,7 @@ func (c *Client) reinit() (err error) {
 
 	c.enc = msgpack.NewEncoder(conn).UseJSONTag(true)
 
-	if err := c.enc.Encode(&handshake{Version: Version}); err != nil {
+	if err := c.enc.Encode(&handshake{Version: Version, AuthKey: c.key}); err != nil {
 		return err
 	}
 

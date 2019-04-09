@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"testing"
 	"time"
 )
@@ -16,16 +17,17 @@ type X struct {
 func TestServer(t *testing.T) {
 	log.SetFlags(log.Lshortfile)
 	RegisterType(0, (*X)(nil))
-	s := NewServer(context.Background())
+	s := New()
 	s.Listen(":9851")
-	err := s.ListenTLS(":9852", "certs/server.pem", "certs/server.key")
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	defer s.Close()
 
+	if testing.Verbose() {
+		s.Logger = log.New(os.Stderr, "", log.Lshortfile)
+	}
+
 	time.Sleep(10 * time.Millisecond)
-	s.On("x", func(ctx context.Context, args ...interface{}) ([]interface{}, error) {
+	s.On("x", func(ctx context.Context, args ...interface{}) (Args, error) {
 		t.Logf("args: %#+v %T", args, args[0])
 		if v, ok := args[0].(int8); ok && v == 0 {
 			return nil, errors.New("err")
@@ -33,10 +35,7 @@ func TestServer(t *testing.T) {
 		return args, nil
 	})
 	//c, err := NewClient("tls://localhost:9852")
-	c, err := NewClient("tls+insecure://localhost:9852")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := NewClient("localhost:9851", "")
 	ret, err := c.Call(context.Background(), "x", int8(1), uint64(1), []float64{0, 0.0000001, -0.5, -0}, "test", []byte("x"), &X{"HI"})
 	if err != nil {
 		t.Fatal(err)

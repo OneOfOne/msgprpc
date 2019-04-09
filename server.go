@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"time"
@@ -19,7 +21,18 @@ const (
 	MinVersion = 1
 
 	ErrClientVersionTooLow = "client version too low"
+	ErrInvalidKey          = "invalid key"
 	ErrNotFound            = "endpoint not found"
+)
+
+var (
+	errRetry      = errors.New("retry")
+	errTooLow     = &handshakeResponse{Version, ErrClientVersionTooLow}
+	errInvalidKey = &handshakeResponse{Version, ErrInvalidKey}
+	errNotFound   = &call{Error: ErrNotFound}
+	okHandshake   = &handshakeResponse{Version: Version}
+
+	connKey = struct{ i int8 }{0}
 )
 
 func init() {
@@ -36,16 +49,11 @@ func RegisterType(id int8, v interface{}) {
 	msgpack.RegisterExt(id, v)
 }
 
-var (
-	errRetry    = errors.New("retry")
-	errTooLow   = &handshakeResponse{Version, ErrClientVersionTooLow}
-	errNotFound = &call{Error: ErrNotFound}
-	okHandshake = &handshakeResponse{Version: Version}
-)
+type Handler func(ctx context.Context, args ...interface{}) (Args, error)
 
-type Handler func(ctx context.Context, args ...interface{}) ([]interface{}, error)
+func New() *Server { return NewWithContext(context.Background()) }
 
-func NewServer(ctx context.Context) *Server {
+func NewWithContext(ctx context.Context) *Server {
 	ctx, cfn := context.WithCancel(ctx)
 	return &Server{
 		m:        map[string]Handler{},
@@ -59,8 +67,10 @@ type Server struct {
 	ctx      context.Context
 	cancelFn context.CancelFunc
 	Logger   interface {
-		Printf(string, ...interface{})
+		Output(int, string) error
 	}
+
+	AuthFn func(key string) bool
 }
 
 func (s *Server) On(endpoint string, h Handler) {
@@ -77,7 +87,7 @@ func (s *Server) Listen(addr string) error {
 	return nil
 }
 
-func (s *Server) ListenTLS(addr, cert, key string) error {
+func (s *Server) ListenAndServeTLS(addr, cert, key string) error {
 	crt, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
 		return err
@@ -95,8 +105,7 @@ func (s *Server) ListenTLS(addr, cert, key string) error {
 		return err
 	}
 
-	go s.Serve(l)
-	return nil
+	return s.Serve(l)
 }
 
 func (s *Server) Serve(l net.Listener) error {
@@ -137,7 +146,7 @@ func (s *Server) handle(conn net.Conn) {
 
 	var hs handshake
 	if err := dec.Decode(&hs); err != nil {
-		s.log("handshake error (%+v): %v", &hs, err)
+		s.log("handshake error (%s, %+v): %v", conn.RemoteAddr(), &hs, err)
 		return
 	}
 
@@ -146,17 +155,26 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
+	if s.AuthFn != nil && !s.AuthFn(hs.AuthKey) {
+		enc.Encode(errInvalidKey)
+		return
+	}
+
 	if err := enc.Encode(okHandshake); err != nil {
-		s.log("handshake error (%+v): %v", &hs, err)
+		s.log("handshake error (%s, %+v): %v", conn.RemoteAddr(), &hs, err)
 		return
 	}
 
 	conn.SetDeadline(time.Time{})
 
+	s.log("new connection from %s", conn.RemoteAddr())
+
 	for {
 		var c call
 		if err := dec.Decode(&c); err != nil {
-			s.log("decode error (%+v): %v", c, err)
+			if err != io.EOF {
+				s.log("decode error (%+v): %v", c, err)
+			}
 			break
 		}
 
@@ -171,7 +189,7 @@ func (s *Server) handle(conn net.Conn) {
 			break
 		}
 
-		resp, err := h(s.ctx, c.Args...)
+		resp, err := h(context.WithValue(s.ctx, connKey, conn), c.Args...)
 		if err != nil {
 			c.Error = err.Error()
 		}
@@ -186,13 +204,19 @@ func (s *Server) handle(conn net.Conn) {
 
 func (s *Server) log(f string, args ...interface{}) {
 	if s.Logger != nil {
-		s.Logger.Printf(f, args)
+		s.Logger.Output(2, fmt.Sprintf("[msgprpc] "+f, args...))
 	}
+}
+
+func GetCtxConnection(ctx context.Context) net.Conn {
+	c, _ := ctx.Value(connKey).(net.Conn)
+	return c
 }
 
 type handshake struct {
 	Version uint64 `msgpack:"v,omitempty"`
 	Flags   uint64 `msgpack:"f,omitempty"`
+	AuthKey string `msgpack:"ak,omitempty"`
 }
 
 type handshakeResponse struct {
