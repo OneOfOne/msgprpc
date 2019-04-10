@@ -149,7 +149,7 @@ func (s *Server) handle(conn net.Conn) {
 
 	var hs handshake
 	if err := dec.Decode(&hs); err != nil {
-		s.log("handshake error (%s, %+v): %v", conn.RemoteAddr(), &hs, err)
+		s.logf("handshake error (%s, %+v): %v", conn.RemoteAddr(), &hs, err)
 		return
 	}
 
@@ -164,13 +164,13 @@ func (s *Server) handle(conn net.Conn) {
 	}
 
 	if err := enc.Encode(okHandshake); err != nil {
-		s.log("handshake error (%s, %+v): %v", conn.RemoteAddr(), &hs, err)
+		s.logf("handshake error (%s, %+v): %v", conn.RemoteAddr(), &hs, err)
 		return
 	}
 
 	conn.SetDeadline(time.Time{})
 
-	s.log("new connection from %s", conn.RemoteAddr())
+	s.logf("new connection from %s", conn.RemoteAddr())
 
 	ctx := context.WithValue(s.ctx, ConnKey, conn)
 
@@ -178,7 +178,7 @@ func (s *Server) handle(conn net.Conn) {
 		var c call
 		if err := dec.Decode(&c); err != nil {
 			if err != io.EOF {
-				s.log("decode error (%+v): %v", c, err)
+				s.logf("decode error (%+v): %v", c, err)
 			}
 			break
 		}
@@ -207,13 +207,13 @@ func (s *Server) handle(conn net.Conn) {
 
 		c.Endpoint, c.Args = "", resp
 		if err := enc.Encode(&c); err != nil {
-			s.log("encode error (%+v): %v", c, err)
+			s.logf("encode error (%+v): %v", c, err)
 			break
 		}
 	}
 }
 
-func (s *Server) log(f string, args ...interface{}) {
+func (s *Server) logf(f string, args ...interface{}) {
 	if s.Logger != nil {
 		s.Logger.Output(2, fmt.Sprintf("[msgprpc] "+f, args...))
 	}
