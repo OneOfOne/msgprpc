@@ -77,47 +77,32 @@ func (c *Client) reinit() (err error) {
 	return nil
 }
 
-type Args []interface{}
+type CallResult struct {
+	Ret []interface{}
+	Err error
+}
 
-func (c *Client) Call(ctx context.Context, endpoint string, args ...interface{}) (out Args, err error) {
-	done := make(chan struct{})
+func (c *Client) Call(ctx context.Context, endpoint string, args ...interface{}) ([]interface{}, error) {
+	res := make(chan *CallResult, 1)
+
 	go func() {
 		c.mux.Lock()
 		defer c.mux.Unlock()
-		if out, err = c.call(endpoint, args...); shouldRetry(err) {
+		out, err := c.call(endpoint, args...)
+		if shouldRetry(err) {
 			if err = c.reinit(); err == nil {
 				out, err = c.call(endpoint, args...)
 			}
 		}
-
-		close(done)
+		res <- &CallResult{out, err}
+		close(res)
 	}()
 
 	select {
-	case <-done:
-		return
+	case v := <-res:
+		return v.Ret, v.Err
 	case <-ctx.Done():
-		c.conn.Close() // kill the connection to free the mutex
 		return nil, ctx.Err()
-	}
-}
-
-func (c *Client) BatchCall(ctx context.Context, endpoint string, allArgs []Args) (out []Args, errs []error) {
-	done := make(chan struct{})
-	out = make([]Args, len(allArgs))
-	errs = make([]error, len(allArgs))
-	go func() {
-		for i := range allArgs {
-			out[i], errs[i] = c.Call(ctx, endpoint, allArgs[i]...)
-		}
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return
-	case <-ctx.Done():
-		return nil, []error{ctx.Err()}
 	}
 }
 
