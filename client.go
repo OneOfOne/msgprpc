@@ -8,14 +8,17 @@ import (
 	"strings"
 	"sync"
 
+	"time"
+
 	"github.com/vmihailenco/msgpack"
 )
 
 func NewClient(addr, key string) *Client {
 	return &Client{
-		addr: addr,
-		key:  key,
-		dec:  msgpack.NewDecoder(nil).UseJSONTag(true),
+		addr:       addr,
+		key:        key,
+		dec:        msgpack.NewDecoder(nil).UseJSONTag(true),
+		MaxRetries: 1000,
 	}
 }
 
@@ -26,6 +29,8 @@ type Client struct {
 	conn net.Conn
 	enc  *msgpack.Encoder
 	dec  *msgpack.Decoder
+
+	MaxRetries int
 }
 
 func (c *Client) reinit() (err error) {
@@ -89,7 +94,13 @@ func (c *Client) Call(ctx context.Context, endpoint string, args ...interface{})
 		c.mux.Lock()
 		defer c.mux.Unlock()
 		out, err := c.call(endpoint, args...)
-		if shouldRetry(err) {
+		for n := c.MaxRetries; err != nil && n > 0; n-- {
+			if !shouldRetry(err) {
+				break
+			}
+
+			time.Sleep(time.Millisecond)
+
 			if err = c.reinit(); err == nil {
 				out, err = c.call(endpoint, args...)
 			}
@@ -150,5 +161,12 @@ func shouldRetry(err error) bool {
 		return true
 	}
 
-	return false
+	switch err.Error() {
+	case "tls: use of closed connection",
+		"tls: protocol is shutdown":
+
+		return true
+	default:
+		return false
+	}
 }
