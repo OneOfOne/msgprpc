@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	Version    = 0.3
-	MinVersion = Version
+	Version    = 0.4
+	MinVersion = 0.3
 
 	ErrClientVersionTooLow = "client version too low"
 	ErrInvalidKey          = "invalid key"
@@ -34,7 +34,9 @@ var (
 	errNotFound   = &call{Error: ErrNotFound}
 	okHandshake   = &handshakeResponse{Version: Version}
 
-	ConnKey = ctxKey{0}
+	ConnKey    = ctxKey{0}
+	EncoderKey = ctxKey{1}
+	DecoderKey = ctxKey{2}
 )
 
 func init() {
@@ -172,7 +174,12 @@ func (s *Server) handle(conn net.Conn) {
 
 	s.logf("new connection from %s", conn.RemoteAddr())
 
-	ctx := context.WithValue(s.ctx, ConnKey, conn)
+	ctx := &srvCtx{
+		Context: s.ctx,
+		conn:    conn,
+		enc:     enc,
+		dec:     dec,
+	}
 
 	for {
 		var c call
@@ -220,8 +227,27 @@ func (s *Server) logf(f string, args ...interface{}) {
 }
 
 func GetConn(ctx context.Context) net.Conn {
-	c, _ := ctx.Value(ConnKey).(net.Conn)
-	return c
+	if ctx, ok := ctx.(*srvCtx); ok {
+		return ctx.conn
+	}
+	v, _ := ctx.Value(ConnKey).(net.Conn)
+	return v
+}
+
+func GetEncoder(ctx context.Context) *msgpack.Encoder {
+	if ctx, ok := ctx.(*srvCtx); ok {
+		return ctx.enc
+	}
+	v, _ := ctx.Value(EncoderKey).(*msgpack.Encoder)
+	return v
+}
+
+func GetDecoder(ctx context.Context) *msgpack.Decoder {
+	if ctx, ok := ctx.(*srvCtx); ok {
+		return ctx.dec
+	}
+	v, _ := ctx.Value(DecoderKey).(*msgpack.Decoder)
+	return v
 }
 
 type handshake struct {
@@ -239,4 +265,24 @@ type call struct {
 	Endpoint string        `msgpack:"ep,omitempty"`
 	Args     []interface{} `msgpack:"a,omitempty"`
 	Error    string        `msgpack:"e,omitempty"`
+}
+
+type srvCtx struct {
+	context.Context
+	conn net.Conn
+	enc  *msgpack.Encoder
+	dec  *msgpack.Decoder
+}
+
+func (c *srvCtx) Value(key interface{}) interface{} {
+	switch key {
+	case ConnKey:
+		return c.conn
+	case EncoderKey:
+		return c.enc
+	case DecoderKey:
+		return c.dec
+	default:
+		return c.Context.Value(key)
+	}
 }
